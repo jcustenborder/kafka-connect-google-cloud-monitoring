@@ -23,19 +23,19 @@ import java.util.Map;
 public class GoogleCloudProjectConnectorConfig extends GoogleCloudConnectorConfig {
 
   public final static String PROJECT_ID_CONFIG = "project.id";
-  static final String PROJECT_ID_DOC = "project.id";
+  static final String PROJECT_ID_DOC = "Project Name or Number";
 
-  public final long projectID;
+  public final String projectID;
 
   public GoogleCloudProjectConnectorConfig(ConfigDef configDef, Map<?, ?> originals) {
     super(configDef, originals);
-    this.projectID = getLong(PROJECT_ID_CONFIG);
+    this.projectID = getString(PROJECT_ID_CONFIG);
   }
 
   public static ConfigDef config() {
     return GoogleCloudConnectorConfig.config()
         .define(
-            ConfigKeyBuilder.of(PROJECT_ID_CONFIG, ConfigDef.Type.LONG)
+            ConfigKeyBuilder.of(PROJECT_ID_CONFIG, ConfigDef.Type.STRING)
                 .documentation(PROJECT_ID_DOC)
                 .importance(ConfigDef.Importance.HIGH)
                 .build()

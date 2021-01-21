@@ -16,6 +16,7 @@
 package com.github.jcustenborder.kafka.connect.google.cloud.monitoring;
 
 import com.github.jcustenborder.kafka.connect.utils.VersionUtil;
+import com.google.api.gax.rpc.InvalidArgumentException;
 import com.google.api.Metric;
 import com.google.api.MonitoredResource;
 import com.google.monitoring.v3.CreateTimeSeriesRequest;
@@ -38,6 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +64,9 @@ public class TimeSeriesSinkTask extends SinkTask {
   @Override
   public void start(Map<String, String> settings) {
     this.config = new TimeSeriesSinkConnectorConfig(settings);
-    this.projectName = ProjectName.of(Long.toString(this.config.projectID));
+    this.projectName = ProjectName.of(this.config.projectID);
+
+    log.trace("starting TimeSeriesSinkTask on {}", this.projectName);
 
     try {
       this.metricService = this.metricServiceFactory.create(this.config);
@@ -76,10 +80,6 @@ public class TimeSeriesSinkTask extends SinkTask {
 
   @Override
   public void put(Collection<SinkRecord> records) {
-    CreateTimeSeriesRequest.Builder createTimeSeriesRequestBuilder = CreateTimeSeriesRequest
-        .newBuilder()
-        .setName(this.projectName.toString());
-
     for (SinkRecord record : records) {
       if (null == record.value()) {
         log.trace("put() - Skipping record because it's a delete");
@@ -91,16 +91,47 @@ public class TimeSeriesSinkTask extends SinkTask {
         );
       }
 
+      long timestamp;
+      if (this.config.metricTimestampPrefix.isEmpty()) {
+        timestamp = record.timestamp();
+      } else {
+        timestamp = getFieldValue(this.config.metricTimestampPrefix, record.value(), Date.class)
+            .getTime();
+      }
       TimeInterval timeInterval = TimeInterval.newBuilder()
-          .setEndTime(Timestamps.fromMillis(record.timestamp()))
+          .setEndTime(Timestamps.fromMillis(timestamp))
           .build();
 
-      Map<String, String> resourceLabels = addLabels(record.value());
-      log.trace("put() - resourceLabels = '{}'", resourceLabels);
+      log.trace("put() - value = '{}'", record.value());
+      Map<String, String> inputLabels = addLabels(record.value());
+      log.trace("put() - inputLabels = '{}'", inputLabels);
+      log.trace("put() - resourceLabelMap = '{}'", this.config.resourceLabelMap);
+
+      Map<String, String> outputLabels;
+      if (this.config.resourceLabelMap.isEmpty()) {
+        outputLabels = inputLabels;
+      } else {
+        outputLabels = new LinkedHashMap<>();
+        this.config.resourceLabelMap.forEach((k, v) -> {
+          // Will cause a DataException when a label is missing.
+          outputLabels.put(v, inputLabels.get(k));
+        });
+      }
+      log.trace("put() - outputLabels = '{}'", outputLabels);
+
       MonitoredResource monitoredResource = MonitoredResource.newBuilder()
           .setType(this.config.resourceType)
-          .putAllLabels(resourceLabels)
+          .putAllLabels(outputLabels)
           .build();
+
+      // Hoisting this Create outside the loop causes issues when sending TimeSeries
+      // to Stackdriver, even when the corresponding Request is after the end of the
+      // loop. It might be possible to reset the Builder instead of instantiating a
+      // new builder for each iteration, but the clear() method does not seem to resent
+      // all of the state of the Builder.
+      CreateTimeSeriesRequest.Builder createTimeSeriesRequestBuilder = CreateTimeSeriesRequest
+          .newBuilder()
+          .setName(this.projectName.toString());
 
       if (TimeSeriesSinkConnectorConfig.MetricNameType.NameField == this.config.metricNameType) {
         String nameValue = getFieldValue(this.config.metricNameField, record.value(), String.class);
@@ -159,7 +190,11 @@ public class TimeSeriesSinkTask extends SinkTask {
 
       CreateTimeSeriesRequest createTimeSeriesRequest = createTimeSeriesRequestBuilder.build();
       log.trace("put() - Calling createTimeSeries\n{}", createTimeSeriesRequest);
-      metricService.createTimeSeries(createTimeSeriesRequest);
+      try {
+        metricService.createTimeSeries(createTimeSeriesRequest);
+      } catch (InvalidArgumentException iae) {
+        log.warn("Error sending TimeSeries to Stackdriver: " + iae.getMessage());
+      }
     }
   }
 
@@ -167,6 +202,7 @@ public class TimeSeriesSinkTask extends SinkTask {
     Map<String, String> result = new LinkedHashMap<>();
     for (String fieldName : this.config.resourceLabelFields) {
       Object fieldValue;
+      log.trace("addLabels() fieldName - {}", fieldName);
       if (value instanceof Struct) {
         Struct struct = (Struct) value;
         fieldValue = struct.get(fieldName);
@@ -177,6 +213,7 @@ public class TimeSeriesSinkTask extends SinkTask {
         fieldValue = null;
       }
 
+      log.trace("addLabels() fieldValue - {}", fieldValue);
       if (fieldValue instanceof String) {
         result.put(fieldName, fieldValue.toString());
       } else if (fieldValue instanceof Map) {

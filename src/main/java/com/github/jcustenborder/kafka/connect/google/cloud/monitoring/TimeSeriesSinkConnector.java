@@ -32,6 +32,7 @@ public class TimeSeriesSinkConnector extends SinkConnector {
   @Override
   public void start(Map<String, String> settings) {
     TimeSeriesSinkConnectorConfig config = new TimeSeriesSinkConnectorConfig(settings);
+    this.settings = settings;
   }
 
   @Override
